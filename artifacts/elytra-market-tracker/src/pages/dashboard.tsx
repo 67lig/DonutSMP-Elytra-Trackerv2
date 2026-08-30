@@ -1,0 +1,498 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  Activity, ArrowDownRight, ArrowUpRight, Bell, Check,
+  ChevronDown, Clock3, DatabaseZap, Info, Layers3, ListFilter,
+  Sparkles, Target,
+  RefreshCw, Search, ServerCrash, ShieldCheck, TrendingDown,
+  Settings2, TrendingUp, Wifi, WifiOff, X,
+} from 'lucide-react';
+import {
+  getGetElytraAlertsQueryKey,
+  getGetElytraDashboardQueryKey,
+  getGetElytraHistoryQueryKey,
+  getGetElytraListingsQueryKey,
+  getGetElytraTransactionsQueryKey,
+  useGetElytraAlerts,
+  useGetElytraDashboard,
+  useGetElytraHistory,
+  useGetElytraListings,
+  useGetElytraTransactions,
+} from '@workspace/api-client-react';
+
+const CATEGORIES = ['elytra'] as const;
+type Category = typeof CATEGORIES[number];
+type Range = 'five_minutes' | 'hour' | 'today' | 'seven_days' | 'thirty_days' | 'one_year';
+type ListingSort = 'lowest' | 'highest' | 'recent';
+type ChartPoint = { timestamp: string; price: number; open: number; high: number; low: number; close: number; priceChange: number | null; sampleSize: number; observationCount: number; category: string };
+type MarketStat = { lowest: number | null; highest: number | null; average: number | null; median: number | null; activeListings: number; priceChange: number | null; currency: string };
+const SETTINGS_STORAGE_KEYS = {
+  median: 'elytra-market-custom-median',
+  alertThreshold: 'elytra-market-alert-threshold',
+} as const;
+
+function readStoredNumber(key: string, fallback: number | null) {
+  if (typeof window === 'undefined') return fallback;
+  const raw = window.localStorage.getItem(key);
+  if (raw === null || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function writeStoredNumber(key: string, value: number | null) {
+  if (typeof window === 'undefined') return;
+  if (value == null) window.localStorage.removeItem(key);
+  else window.localStorage.setItem(key, String(value));
+}
+
+function parsePriceInput(input: string) {
+  const normalized = input.trim().replace(/,/g, '').toUpperCase();
+  const match = normalized.match(/^([0-9]+(?:\.[0-9]+)?)\s*([KMBT])?$/);
+  if (!match) return null;
+  const base = Number(match[1]);
+  const multiplier = { K: 1_000, M: 1_000_000, B: 1_000_000_000, T: 1_000_000_000_000 }[match[2] as 'K' | 'M' | 'B' | 'T'] ?? 1;
+  const value = base * multiplier;
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+const categoryName: Record<Category, string> = {
+  elytra: 'Elytra',
+};
+const categoryShort: Record<Category, string> = {
+  elytra: 'Elytra',
+};
+
+function isCategory(value: string | undefined): value is Category {
+  return !!value && (CATEGORIES as readonly string[]).includes(value);
+}
+function formatNumber(value: number | null | undefined, digits = 0) {
+  return value == null ? '—' : new Intl.NumberFormat('en-US', { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(value);
+}
+function formatPrice(value: number | null | undefined, currency = 'coins') {
+  return value == null ? '—' : `${formatNumber(value, 0)} ${currency}`;
+}
+function formatTime(value: string | null | undefined, withDate = false) {
+  if (!value) return 'No timestamp';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('en-US', withDate ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' } : { hour: 'numeric', minute: '2-digit' }).format(date);
+}
+function formatRelative(value: string | null | undefined) {
+  if (!value) return 'not available';
+  const diff = Math.round((Date.now() - new Date(value).getTime()) / 60000);
+  if (diff < 1) return 'just now';
+  if (diff < 60) return `${diff}m ago`;
+  if (diff < 1440) return `${Math.floor(diff / 60)}h ago`;
+  return `${Math.floor(diff / 1440)}d ago`;
+}
+function safeCategory(value: string): Category | null {
+  return isCategory(value) ? value : null;
+}
+
+function Skeleton({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse rounded bg-[hsl(222_22%_20%)] ${className}`} />;
+}
+
+function SectionHeading({ eyebrow, title, detail, action }: { eyebrow: string; title: string; detail?: string; action?: ReactNode }) {
+  return (
+    <div className="mb-4 flex items-end justify-between gap-3">
+      <div>
+        <p className="mono text-[10px] uppercase tracking-[.2em] text-[hsl(var(--primary))]">{eyebrow}</p>
+        <h2 className="display mt-1 text-lg font-bold tracking-tight text-[hsl(var(--foreground))]">{title}</h2>
+        {detail && <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{detail}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function SelectControl({ value, onChange, children, label, testId }: { value: string; onChange: (value: string) => void; children: ReactNode; label: string; testId: string }) {
+  return (
+    <label className="relative flex items-center">
+      <span className="sr-only">{label}</span>
+      <select data-testid={testId} value={value} onChange={(event) => onChange(event.target.value)} className="appearance-none rounded-lg border border-[hsl(var(--card-border))] bg-[hsl(var(--secondary))] py-2 pl-3 pr-8 text-xs font-semibold text-[hsl(var(--foreground))] outline-none transition-colors hover:border-[hsl(var(--primary)/.55)] focus:border-[hsl(var(--primary))]">
+        {children}
+      </select>
+      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 text-[hsl(var(--muted-foreground))]" />
+    </label>
+  );
+}
+
+function Delta({ value }: { value: number | null | undefined }) {
+  if (value == null) return <span className="mono text-[11px] text-[hsl(var(--muted-foreground))]">No change</span>;
+  const up = value > 0;
+  const flat = value === 0;
+  return (
+    <span className={`inline-flex items-center gap-1 mono text-[11px] font-medium ${flat ? 'text-[hsl(var(--muted-foreground))]' : up ? 'text-[hsl(var(--destructive))]' : 'text-[hsl(var(--chart-3))]'}`}>
+      {flat ? <Activity size={12} /> : up ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+      {flat ? '0.0%' : `${up ? '+' : ''}${value.toFixed(1)}%`}
+    </span>
+  );
+}
+
+function StatusPill({ connected, label }: { connected: boolean; label: string }) {
+  return (
+    <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 mono text-[10px] uppercase tracking-wider ${connected ? 'border-[hsl(var(--chart-3)/.28)] bg-[hsl(var(--chart-3)/.08)] text-[hsl(var(--chart-3))]' : 'border-[hsl(var(--destructive)/.3)] bg-[hsl(var(--destructive)/.08)] text-[hsl(var(--destructive))]'}`}>
+      <span className={`live-dot h-1.5 w-1.5 rounded-full ${connected ? 'bg-[hsl(var(--chart-3))]' : 'bg-[hsl(var(--destructive))]'}`} />
+      {label}
+    </span>
+  );
+}
+
+function ApiBanner({ api, generatedAt, isError, onRetry }: { api?: { connected: boolean; lastUpdated: string | null; requestsInWindow: number; requestLimit: number; message: string }; generatedAt?: string; isError: boolean; onRetry: () => void }) {
+  const waiting = !api && !isError;
+  const connected = !!api?.connected && !isError;
+  const visibleConnected = connected || waiting;
+  return (
+    <div data-testid="status-api-banner" className={`panel flex flex-col gap-3 rounded-xl px-4 py-3 sm:flex-row sm:items-center sm:justify-between ${visibleConnected ? 'cyan-rule' : 'amber-rule'}`}>
+      <div className="flex items-start gap-3">
+        {visibleConnected ? <Wifi size={18} className="mt-0.5 text-[hsl(var(--chart-3))]" /> : <WifiOff size={18} className="mt-0.5 text-[hsl(var(--accent))]" />}
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-bold">{waiting ? 'Connecting to market feed' : connected ? 'Live market feed' : 'Feed unavailable'}</p>
+            <StatusPill connected={visibleConnected} label={waiting ? 'connecting' : connected ? 'connected' : 'offline'} />
+          </div>
+          <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{isError ? 'The market endpoint did not respond. Existing observations are not being replaced.' : api?.message || 'Opening the DonutSMP market feed.'}</p>
+        </div>
+      </div>
+      <div className="flex items-center gap-4 sm:justify-end">
+        <div className="text-right">
+          <p className="mono text-[10px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">last packet</p>
+          <p className="mono mt-0.5 text-xs text-[hsl(var(--foreground))]">{formatRelative(api?.lastUpdated || generatedAt)}</p>
+        </div>
+        {api && <div className="hidden text-right sm:block"><p className="mono text-[10px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">request window</p><p className="mono mt-0.5 text-xs text-[hsl(var(--foreground))]">{api.requestsInWindow} / {api.requestLimit}</p></div>}
+        {isError && <button type="button" data-testid="button-retry-dashboard" onClick={onRetry} className="rounded-lg border border-[hsl(var(--card-border))] p-2 text-[hsl(var(--primary))] transition-colors hover:bg-[hsl(var(--secondary))]" aria-label="Retry market feed"><RefreshCw size={15} /></button>}
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ category, stat, selected, onSelect, benchmarkMedian, hasCustomMedian, onEditMedian }: { category: Category; stat?: MarketStat; selected: boolean; onSelect: () => void; benchmarkMedian: number | null; hasCustomMedian: boolean; onEditMedian: () => void }) {
+  const displayedMedian = benchmarkMedian ?? stat?.median;
+  return (
+    <div className={`panel cyan-rule group relative min-w-0 rounded-xl p-1 transition-all hover:-translate-y-0.5 hover:border-[hsl(var(--primary)/.55)] ${selected ? 'border-[hsl(var(--primary)/.7)] bg-[hsl(var(--primary)/.05)]' : ''}`}>
+      <button type="button" data-testid={`button-category-${category}`} onClick={onSelect} className="w-full rounded-lg p-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--primary))]">
+        <div className="flex items-start justify-between gap-2 pr-10">
+          <div><p className="mono text-[10px] uppercase tracking-[.15em] text-[hsl(var(--muted-foreground))]">market</p><h3 className="display mt-1 text-sm font-bold">{categoryName[category]}</h3></div>
+        </div>
+        <div className="mt-5 flex items-end justify-between">
+           <div><p className="mono text-[10px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">{hasCustomMedian ? 'your median' : 'cheapest benchmark'}</p><p data-testid={`text-median-${category}`} className="display mt-1 text-2xl font-bold tracking-tight">{displayedMedian != null ? formatPrice(displayedMedian, stat?.currency) : '—'}</p></div>
+          <Delta value={stat?.priceChange} />
+        </div>
+         <div className="mt-4 grid grid-cols-2 gap-2 border-t border-[hsl(var(--card-border))] pt-3 text-xs">
+            <div><span className="text-[hsl(var(--muted-foreground))]">low </span><span className="mono">{formatPrice(stat?.lowest, stat?.currency)}</span></div>
+            <div className="text-right"><span className="text-[hsl(var(--muted-foreground))]">active </span><span className="mono text-[hsl(var(--primary))]">{formatNumber(stat?.activeListings)}</span></div>
+         </div>
+      </button>
+      <button type="button" data-testid={`button-edit-median-${category}`} onClick={onEditMedian} className={`absolute right-4 top-4 rounded-md p-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--primary))] ${selected ? 'bg-[hsl(var(--primary)/.14)] text-[hsl(var(--primary))]' : 'bg-[hsl(var(--secondary))] text-[hsl(var(--muted-foreground))]'} hover:bg-[hsl(var(--primary)/.18)] hover:text-[hsl(var(--primary))]`} aria-label={`Set median benchmark for ${categoryName[category]}`} title="Set median benchmark">
+        <Layers3 size={15} />
+      </button>
+    </div>
+  );
+}
+
+function buildCandlePoints(points: ChartPoint[]) {
+  return points.map((point) => ({
+    ...point,
+    open: point.open,
+    high: point.high,
+    low: point.low,
+    close: point.close,
+  }));
+}
+
+function formatChartValue(value: number) {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 20 }).format(value);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getBuySignal(points: ChartPoint[], stat?: MarketStat) {
+  const prices = points.map((point) => point.price).filter((price) => Number.isFinite(price));
+  if (!prices.length) {
+    return { shouldBuy: false, confidence: 0, current: null, baseline: null, discount: null, changeFromBaseline: null, trend: null };
+  }
+
+  const current = prices[prices.length - 1];
+  const recent = prices.slice(-Math.min(8, prices.length));
+  const baseline = stat?.median ?? stat?.average ?? recent.reduce((sum, price) => sum + price, 0) / recent.length;
+  const discount = ((baseline - current) / baseline) * 100;
+  const changeFromBaseline = ((current - baseline) / baseline) * 100;
+  const trend = ((current - prices[0]) / prices[0]) * 100;
+  const recentTrend = ((current - recent[0]) / recent[0]) * 100;
+  const score = prices.length === 1 ? discount : discount * 0.72 - recentTrend * 0.28;
+  const shouldBuy = score > 0.35;
+  const confidence = clamp(Math.round((prices.length === 1 ? 42 : 56) + Math.min(prices.length, 18) + Math.min(Math.abs(score) * 2.2, 18) + (stat?.median != null ? 5 : 0)), 0, 94);
+
+  return { shouldBuy, confidence, current, baseline, discount, changeFromBaseline, trend };
+}
+
+function HistoryPanel({ points, loading, category, median, onSaveMedian, medianEditorOpen, onCloseMedianEditor }: { points: ChartPoint[]; loading: boolean; category: Category; median: number | null; onSaveMedian: (value: number | null) => void; medianEditorOpen: boolean; onCloseMedianEditor: () => void }) {
+  const chartPoints = points.filter((point) => isCategory(point.category) && point.category === category);
+  const candles = buildCandlePoints(chartPoints);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [medianInput, setMedianInput] = useState(median == null ? '' : String(median));
+  const [medianInputDirty, setMedianInputDirty] = useState(false);
+  const medianInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!medianInputDirty) setMedianInput(median == null ? '' : String(median));
+  }, [median, medianInputDirty]);
+  useEffect(() => {
+    if (medianEditorOpen) medianInputRef.current?.focus();
+  }, [medianEditorOpen]);
+  const saveMedian = () => {
+    const value = parsePriceInput(medianInput);
+    if (medianInput.trim() === '') {
+      onSaveMedian(null);
+      setMedianInputDirty(false);
+      onCloseMedianEditor();
+    } else if (value != null) {
+      onSaveMedian(value);
+      setMedianInputDirty(false);
+      onCloseMedianEditor();
+    }
+  };
+  const chartPrices = candles.flatMap((point) => [point.high, point.low]);
+  const chartMax = chartPrices.length ? Math.max(...chartPrices) : 1;
+  const chartMin = chartPrices.length ? Math.min(...chartPrices) : 0;
+  const chartRange = Math.max(chartMax - chartMin, Number.EPSILON);
+  const plotLeft = 24;
+  const plotRight = 858;
+  const plotTop = 42;
+  const plotBottom = 224;
+  const plotWidth = plotRight - plotLeft;
+  const plotHeight = plotBottom - plotTop;
+  const priceToY = (price: number) => plotTop + ((chartMax - price) / chartRange) * plotHeight;
+  const hoveredPoint = hoveredIndex == null ? null : candles[hoveredIndex];
+  const hoveredRatio = hoveredIndex == null ? 0.5 : hoveredIndex / Math.max(candles.length - 1, 1);
+  const tooltipAtStart = hoveredRatio < 0.18;
+  const tooltipAtEnd = hoveredRatio > 0.82;
+  const tooltipPositionClass = tooltipAtStart ? 'left-0' : tooltipAtEnd ? 'right-0' : 'left-1/2 -translate-x-1/2';
+  const tooltipPositionStyle = tooltipAtStart || tooltipAtEnd ? undefined : { left: `${hoveredRatio * 100}%` };
+  const yLabels = Array.from({ length: 5 }, (_, index) => chartMax - (chartRange * index) / 4);
+  return (
+    <section className="relative min-w-0 bg-[#12161d]">
+      {medianEditorOpen && <div className="absolute right-2 top-2 z-40 flex items-end gap-2 bg-[#12161d] p-2">
+        <label className="text-left">
+          <span className="mono block text-[9px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">median benchmark</span>
+          <input ref={medianInputRef} data-testid="input-custom-median" type="text" inputMode="decimal" value={medianInput} onChange={(event) => { setMedianInput(event.target.value); setMedianInputDirty(true); }} placeholder="e.g. 400M" aria-label="Median benchmark price" className="mt-1 w-28 bg-[#1b222c] px-2 py-1.5 text-xs text-[hsl(var(--foreground))] outline-none" />
+        </label>
+        <button type="button" data-testid="button-save-median" onClick={saveMedian} className="h-[31px] bg-[hsl(var(--primary))] px-2.5 text-[10px] font-bold text-[hsl(var(--primary-foreground))]"><Check size={12} /></button>
+        {median != null && <button type="button" data-testid="button-reset-median" onClick={() => { setMedianInput(''); setMedianInputDirty(false); onSaveMedian(null); onCloseMedianEditor(); }} className="h-[31px] bg-[#1b222c] px-2 text-[10px] font-semibold text-[hsl(var(--muted-foreground))]">Reset</button>}
+      </div>}
+      {loading ? <div className="h-[280px] w-full bg-[#12161d]" /> : candles.length < 1 ? (
+        <div data-testid="empty-history" className="flex h-[280px] items-center justify-center bg-[#12161d] text-center text-xs text-[hsl(var(--muted-foreground))]">No price observations</div>
+      ) : (
+        <div className="relative h-[280px] w-full overflow-hidden bg-[#12161d]">
+          {hoveredPoint && <div className={`pointer-events-none absolute top-0 z-30 w-48 bg-[#242b36] px-3 py-2 ${tooltipPositionClass}`} style={tooltipPositionStyle}>
+            <p className="mono text-[9px] text-[hsl(var(--muted-foreground))]">{formatTime(hoveredPoint.timestamp, true)}</p>
+            <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+              <span className="text-[hsl(var(--muted-foreground))]">Open <strong className="mono font-normal text-[hsl(var(--foreground))]">{formatChartValue(hoveredPoint.open)}</strong></span>
+              <span className="text-[hsl(var(--muted-foreground))]">Close <strong className="mono font-bold text-[hsl(var(--foreground))]">{formatChartValue(hoveredPoint.close)}</strong></span>
+              <span className="text-[hsl(var(--muted-foreground))]">High <strong className="mono font-normal text-[hsl(var(--chart-3))]">{formatChartValue(hoveredPoint.high)}</strong></span>
+              <span className="text-[hsl(var(--muted-foreground))]">Low <strong className="mono font-normal text-[hsl(var(--destructive))]">{formatChartValue(hoveredPoint.low)}</strong></span>
+            </div>
+            <p className="mt-1.5 mono text-[9px] text-[hsl(var(--muted-foreground))]">{formatChartValue(hoveredPoint.observationCount)} observations</p>
+          </div>}
+          <svg viewBox="0 0 1000 280" className="block h-full w-full" role="img" aria-label="Elytra price candlestick chart">
+            {yLabels.map((value, index) => {
+              const ratio = index / (yLabels.length - 1);
+              const y = plotTop + ratio * plotHeight;
+              return <g key={`${value}-${index}`}><line x1={plotLeft} x2={plotRight} y1={y} y2={y} stroke="currentColor" strokeDasharray="2 6" strokeOpacity=".22" /><text x="875" y={y + 3} fill="currentColor" fillOpacity=".7" fontFamily="var(--app-font-mono)" fontSize="10">{formatChartValue(value)}</text></g>;
+            })}
+            {candles.map((point, index) => {
+              const slotWidth = plotWidth / candles.length;
+              const centerX = plotLeft + (index + 0.5) * slotWidth;
+              const isRising = point.close >= point.open;
+              const color = isRising ? 'hsl(var(--chart-3))' : 'hsl(var(--destructive))';
+              const wickTop = priceToY(point.high);
+              const wickBottom = priceToY(point.low);
+              const bodyTop = priceToY(Math.max(point.open, point.close));
+              const bodyBottom = priceToY(Math.min(point.open, point.close));
+              const bodyHeight = Math.max(bodyBottom - bodyTop, 1.5);
+              const bodyWidth = Math.min(10, Math.max(2, slotWidth * 0.42));
+              const x = centerX - bodyWidth / 2;
+              return <g key={`${point.timestamp}-${index}`} onPointerEnter={() => setHoveredIndex(index)} onPointerLeave={() => setHoveredIndex(null)} onFocus={() => setHoveredIndex(index)} onBlur={() => setHoveredIndex(null)}>
+                <rect x={plotLeft + index * slotWidth} y={plotTop} width={slotWidth} height={plotHeight} fill="transparent" tabIndex={0} role="button" aria-label={`${formatTime(point.timestamp, true)} at ${formatChartValue(point.close)}`} />
+                {hoveredIndex === index && <line x1={centerX} x2={centerX} y1={plotTop} y2={plotBottom} stroke="currentColor" strokeDasharray="2 5" strokeOpacity=".45" />}
+                <line x1={centerX} x2={centerX} y1={wickTop} y2={wickBottom} stroke={color} strokeWidth="1" />
+                <rect x={x} y={bodyTop} width={bodyWidth} height={bodyHeight} fill={color} />
+              </g>;
+            })}
+            {[candles[0], candles[Math.floor((candles.length - 1) / 2)], candles[candles.length - 1]].map((point, index) => {
+              const x = index === 0 ? plotLeft : index === 1 ? plotLeft + plotWidth / 2 : plotRight;
+              return <text key={`${point.timestamp}-${index}`} x={x} y="262" textAnchor={index === 0 ? 'start' : index === 2 ? 'end' : 'middle'} fill="currentColor" fillOpacity=".7" fontFamily="var(--app-font-mono)" fontSize="10">{formatTime(point.timestamp)}</text>;
+            })}
+          </svg>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PredictionPanel({ points, stat, loading, median, medianIsCustom }: { points: ChartPoint[]; stat?: MarketStat; loading: boolean; median: number | null; medianIsCustom: boolean }) {
+  const signalStat = median == null
+    ? stat
+    : stat
+      ? { ...stat, median }
+      : { lowest: null, highest: null, average: null, median, activeListings: 0, priceChange: null, currency: 'coins' };
+  const signal = getBuySignal(points, signalStat);
+  const hasSignal = signal.current != null && signal.baseline != null;
+  const positive = signal.shouldBuy && hasSignal;
+  return (
+    <section className={`panel min-w-0 rounded-xl p-4 sm:p-5 ${positive ? 'cyan-rule' : 'amber-rule'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="mono text-[10px] uppercase tracking-[.2em] text-[hsl(var(--accent))]">market signal</p>
+          <h2 className="display mt-1 text-lg font-bold tracking-tight">Should you buy?</h2>
+          <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">A quick read from observed price behavior</p>
+        </div>
+        <span className={`rounded-lg p-2 ${positive ? 'bg-[hsl(var(--chart-3)/.12)] text-[hsl(var(--chart-3))]' : 'bg-[hsl(var(--accent)/.12)] text-[hsl(var(--accent))]'}`}><Sparkles size={17} /></span>
+      </div>
+      {loading ? <div className="mt-6 space-y-3"><Skeleton className="h-14 w-full" /><Skeleton className="h-4 w-2/3" /><Skeleton className="h-2 w-full" /></div> : !hasSignal ? (
+        <div className="mt-6 rounded-lg border border-dashed border-[hsl(var(--card-border))] p-4 text-center"><Target size={20} className="mx-auto text-[hsl(var(--muted-foreground))]" /><p className="mt-2 text-sm font-semibold">Waiting for a signal</p><p className="mt-1 text-xs leading-5 text-[hsl(var(--muted-foreground))]">A current market price or observed median is needed before making a comparison.</p></div>
+      ) : (
+        <>
+          <div className="mt-6 flex items-end justify-between gap-3">
+            <div>
+              <p className="mono text-[10px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">recommendation</p>
+              <p data-testid="text-buy-recommendation" className={`display mt-1 text-4xl font-bold tracking-[-.05em] ${positive ? 'text-[hsl(var(--chart-3))]' : 'text-[hsl(var(--accent))]'}`}>{positive ? 'YES' : 'NO'}</p>
+            </div>
+            <div className="text-right">
+              <p className="mono text-[10px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">estimated accuracy</p>
+              <p data-testid="text-buy-confidence" className="display mt-1 text-2xl font-bold">{signal.confidence}%</p>
+            </div>
+          </div>
+          <div className="mt-4">
+            <div className="mb-2 flex justify-between text-[10px]"><span className="text-[hsl(var(--muted-foreground))]">signal confidence</span><span className="mono">{signal.confidence}%</span></div>
+            <div className="h-2 overflow-hidden rounded-full bg-[hsl(var(--secondary))]"><div className={`h-full rounded-full transition-all ${positive ? 'bg-[hsl(var(--chart-3))]' : 'bg-[hsl(var(--accent))]'}`} style={{ width: `${signal.confidence}%` }} /></div>
+          </div>
+          <div className="mt-5 space-y-2 border-t border-[hsl(var(--card-border))] pt-4 text-xs">
+            <div className="flex items-center justify-between gap-2"><span className="text-[hsl(var(--muted-foreground))]">latest price</span><span className="mono">{formatPrice(signal.current)}</span></div>
+             <div className="flex items-center justify-between gap-2"><span className="text-[hsl(var(--muted-foreground))]">{medianIsCustom ? 'your median' : 'cheapest benchmark'}</span><span className="mono">{formatPrice(signal.baseline)}</span></div>
+            <div className="flex items-center justify-between gap-2"><span className="text-[hsl(var(--muted-foreground))]">vs. median</span><span className={signal.changeFromBaseline >= 0 ? 'text-[hsl(var(--chart-3))]' : 'text-[hsl(var(--destructive))]'}>{signal.changeFromBaseline >= 0 ? '+' : ''}{signal.changeFromBaseline.toFixed(1)}%</span></div>
+          </div>
+          <p className="mt-4 flex items-start gap-2 text-[10px] leading-4 text-[hsl(var(--muted-foreground))]"><Info size={13} className="mt-0.5 shrink-0 text-[hsl(var(--primary))]" /> Heuristic confidence, not a guarantee. It weighs current price against the observed median and recent momentum.</p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ListingsPanel({ listings, loading, category, sort, setSort }: { listings: any[]; loading: boolean; category: Category; sort: ListingSort; setSort: (value: ListingSort) => void }) {
+  const [search, setSearch] = useState('');
+  const filtered = listings.filter((listing) => {
+    const valid = safeCategory(listing.category);
+    return valid === category && `${listing.displayName} ${listing.seller}`.toLowerCase().includes(search.toLowerCase());
+  });
+  return (
+    <section className="panel min-w-0 rounded-xl p-4 sm:p-5">
+      <SectionHeading eyebrow="live inventory" title="Current listings" detail="Elytras returned by the DonutSMP Auction House search" action={<span className="mono rounded-md bg-[hsl(var(--secondary))] px-2 py-1 text-[10px] text-[hsl(var(--primary))]">{filtered.length} shown</span>} />
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row">
+        <label className="relative flex-1"><Search size={14} className="absolute left-3 top-2.5 text-[hsl(var(--muted-foreground))]" /><input data-testid="input-listing-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search seller or item ID" className="w-full rounded-lg border border-[hsl(var(--card-border))] bg-[hsl(var(--secondary))] py-2 pl-9 pr-3 text-xs outline-none placeholder:text-[hsl(var(--muted-foreground))] focus:border-[hsl(var(--primary))]" /></label>
+        <SelectControl value={sort} onChange={(value) => setSort(value as ListingSort)} label="Listing sort" testId="select-listing-sort"><option value="recent">Recent</option><option value="lowest">Lowest</option><option value="highest">Highest</option></SelectControl>
+      </div>
+      <div className="scrollbar-thin max-h-[345px] overflow-auto">
+         {loading ? <div className="space-y-2"><Skeleton className="h-14 w-full" /><Skeleton className="h-14 w-full" /><Skeleton className="h-14 w-full" /></div> : filtered.length === 0 ? <div data-testid="empty-listings" className="rounded-lg border border-dashed border-[hsl(var(--card-border))] px-4 py-9 text-center"><ListFilter size={20} className="mx-auto text-[hsl(var(--muted-foreground))]" /><p className="mt-2 text-sm font-semibold">{search ? 'No matching listings' : 'No active listings'}</p><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">The endpoint returned no direct Elytra listings for this filter.</p></div> : <div className="space-y-1.5">{filtered.map((listing) => <div data-testid={`row-listing-${listing.id}`} key={listing.id} className="group grid grid-cols-[1fr_auto] gap-3 rounded-lg border border-transparent px-3 py-2.5 transition-colors hover:border-[hsl(var(--card-border))] hover:bg-[hsl(var(--secondary)/.55)] sm:grid-cols-[1.25fr_.8fr_auto]">
+           <div className="min-w-0"><div className="flex items-center gap-2"><p className="truncate text-xs font-bold">{listing.displayName || 'Elytra'}</p><span className="hidden rounded bg-[hsl(var(--primary)/.1)] px-1.5 py-0.5 mono text-[9px] text-[hsl(var(--primary))] sm:inline">{categoryShort[safeCategory(listing.category) || 'elytra']}</span></div><p className="mt-1 truncate text-[10px] text-[hsl(var(--muted-foreground))]">{listing.seller} · {listing.quantity} unit{listing.quantity === 1 ? '' : 's'}{listing.timeRemaining ? ` · ${listing.timeRemaining}` : ''}</p></div>
+          <p className="mono self-center text-right text-sm font-bold">{formatPrice(listing.price)}</p>
+          <p className="col-start-1 text-[10px] text-[hsl(var(--muted-foreground))] sm:col-auto sm:self-center sm:text-right">{formatTime(listing.collectedAt)}</p>
+        </div>)}</div>}
+      </div>
+    </section>
+  );
+}
+
+function TransactionsPanel({ transactions, loading, category }: { transactions: any[]; loading: boolean; category: Category }) {
+  const filtered = transactions.filter((item) => safeCategory(item.category) === category);
+  return (
+    <section className="panel min-w-0 rounded-xl p-4 sm:p-5">
+      <SectionHeading eyebrow="recent prints" title="Recent market activity" detail="New Elytras observed by the tracker" action={<span className="mono rounded-md bg-[hsl(var(--secondary))] px-2 py-1 text-[10px] text-[hsl(var(--primary))]">Elytra</span>} />
+       <div className="scrollbar-thin max-h-[340px] overflow-auto">
+         {loading ? <div className="space-y-2"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></div> : filtered.length === 0 ? <div data-testid="empty-transactions" className="rounded-lg border border-dashed border-[hsl(var(--card-border))] px-4 py-9 text-center"><Clock3 size={20} className="mx-auto text-[hsl(var(--muted-foreground))]" /><p className="mt-2 text-sm font-semibold">No recent activity</p><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">No new Elytra listings have been observed yet.</p></div> : <div className="space-y-1.5">{filtered.map((item) => <div data-testid={`row-transaction-${item.id}`} key={item.id} className="grid grid-cols-[1fr_auto] gap-3 rounded-lg border border-transparent px-3 py-2.5 transition-colors hover:border-[hsl(var(--card-border)/.55)] hover:bg-[hsl(var(--secondary)/.55)]"><div><p className="text-xs font-bold">{item.seller}</p><p className="mt-1 text-[10px] text-[hsl(var(--muted-foreground))]">{categoryShort[safeCategory(item.category) || 'elytra']} · {item.quantity} unit{item.quantity === 1 ? '' : 's'} · {formatTime(item.timestamp)}</p></div><p className="mono self-center text-sm font-bold">{formatPrice(item.price)}</p></div>)}</div>}
+      </div>
+    </section>
+  );
+}
+
+function AlertsPanel({ alerts, loading, threshold, onSaveThreshold }: { alerts: any[]; loading: boolean; threshold: number; onSaveThreshold: (value: number) => void }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [thresholdInput, setThresholdInput] = useState(String(threshold));
+  useEffect(() => {
+    setThresholdInput(String(threshold));
+  }, [threshold]);
+  const valid = alerts.filter((alert) => safeCategory(alert.category));
+  const saveThreshold = () => {
+    const value = Math.floor(Number(thresholdInput));
+    if (Number.isFinite(value) && value >= 1 && value <= 100) {
+      onSaveThreshold(value);
+      setSettingsOpen(false);
+    }
+  };
+  return (
+    <section className="panel min-w-0 rounded-xl p-4 sm:p-5">
+       <SectionHeading eyebrow="market watch" title="Detected alerts" detail={`Buy and sell activity affecting ${threshold}+ units`} action={<div className="flex items-center gap-2"><button type="button" data-testid="button-alert-settings" onClick={() => setSettingsOpen((open) => !open)} className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-[10px] font-bold transition-colors ${settingsOpen ? 'border-[hsl(var(--accent)/.5)] bg-[hsl(var(--accent)/.1)] text-[hsl(var(--accent))]' : 'border-[hsl(var(--card-border))] text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]'}`}><Settings2 size={13} /> Settings</button><Bell size={17} className="text-[hsl(var(--accent))]" /></div>} />
+       {settingsOpen && <div data-testid="alert-settings" className="mb-4 rounded-lg border border-[hsl(var(--accent)/.3)] bg-[hsl(var(--accent)/.06)] p-3"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold">Alert sensitivity</p><p className="mt-1 text-[10px] leading-4 text-[hsl(var(--muted-foreground))]">Show alerts when at least this many units are added or removed.</p></div><button type="button" onClick={() => setSettingsOpen(false)} className="text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]" aria-label="Close alert settings"><X size={14} /></button></div><div className="mt-3 flex items-end gap-2"><label className="flex-1"><span className="mono block text-[9px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">minimum units</span><input data-testid="input-alert-threshold" type="number" min="1" max="100" step="1" value={thresholdInput} onChange={(event) => setThresholdInput(event.target.value)} className="mt-1 w-full rounded-md border border-[hsl(var(--card-border))] bg-[hsl(var(--secondary)/.72)] px-2 py-1.5 text-xs outline-none focus:border-[hsl(var(--accent))]" /></label><button type="button" data-testid="button-save-alert-settings" onClick={saveThreshold} className="inline-flex h-[31px] items-center gap-1.5 rounded-md bg-[hsl(var(--accent))] px-2.5 text-[10px] font-bold text-[hsl(var(--accent-foreground))] hover:opacity-85"><Check size={12} /> Save</button></div></div>}
+      {loading ? <div className="space-y-2"><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /></div> : valid.length === 0 ? <div data-testid="empty-alerts" className="rounded-lg border border-dashed border-[hsl(var(--card-border))] px-4 py-9 text-center"><ShieldCheck size={20} className="mx-auto text-[hsl(var(--chart-3))]" /><p className="mt-2 text-sm font-semibold">No market alerts</p><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">No material activity has been detected in the current alert window.</p></div> : <div className="space-y-2">{valid.map((alert) => { const buy = alert.type === 'massive_buy'; return <div data-testid={`row-alert-${alert.id}`} key={alert.id} className={`rounded-lg border p-3 ${buy ? 'border-[hsl(var(--chart-3)/.22)] bg-[hsl(var(--chart-3)/.05)]' : 'border-[hsl(var(--accent)/.22)] bg-[hsl(var(--accent)/.05)]'}`}><div className="flex items-start gap-3"><span className={`mt-0.5 rounded-md p-1.5 ${buy ? 'bg-[hsl(var(--chart-3)/.12)] text-[hsl(var(--chart-3))]' : 'bg-[hsl(var(--accent)/.12)] text-[hsl(var(--accent))]'}`}>{buy ? <ArrowUpRight size={15} /> : <ArrowDownRight size={15} />}</span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="text-xs font-bold">{buy ? 'Massive buy' : 'Massive sell'} · {categoryShort[safeCategory(alert.category) || 'elytra']}</p><span className="mono text-[10px] text-[hsl(var(--muted-foreground))]">{formatRelative(alert.detectedAt)}</span></div><p className="mt-1 text-[11px] text-[hsl(var(--muted-foreground))]">{formatNumber(alert.affectedQuantity)} units affected{alert.estimatedValue != null ? ` · estimated ${formatPrice(alert.estimatedValue)}` : ''}</p>{alert.percentageChange != null && <div className="mt-2 flex gap-3 text-[10px]"><span className={buy ? 'text-[hsl(var(--chart-3))]' : 'text-[hsl(var(--accent))]'}>{buy ? 'Demand signal' : 'Supply signal'} {alert.percentageChange > 0 ? '+' : ''}{alert.percentageChange.toFixed(1)}%</span>{alert.previousPrice != null && alert.currentPrice != null && <span className="text-[hsl(var(--muted-foreground))]">{formatPrice(alert.previousPrice)} → {formatPrice(alert.currentPrice)}</span>}</div>}</div></div></div>; })}</div>}
+    </section>
+  );
+}
+
+export default function Dashboard() {
+  const [category, setCategory] = useState<Category>(CATEGORIES[0]);
+  const historyRange: Range = 'seven_days';
+  const [listingCategory] = useState<Category>(CATEGORIES[0]);
+  const [transactionCategory] = useState<Category>(CATEGORIES[0]);
+  const [listingSort, setListingSort] = useState<ListingSort>('recent');
+  const [medianEditorOpen, setMedianEditorOpen] = useState(false);
+  const [customMedian, setCustomMedian] = useState<number | null>(() => readStoredNumber(SETTINGS_STORAGE_KEYS.median, null));
+  const [alertThreshold, setAlertThreshold] = useState(() => Math.floor(readStoredNumber(SETTINGS_STORAGE_KEYS.alertThreshold, 10) ?? 10));
+
+  const historyParams = useMemo(() => ({ range: historyRange, category }), [category]);
+  const listingParams = useMemo(() => ({ sort: listingSort, category: listingCategory }), [listingCategory, listingSort]);
+  const transactionParams = useMemo(() => ({ category: transactionCategory }), [transactionCategory]);
+  const alertParams = useMemo(() => ({ limit: 8, threshold: alertThreshold }), [alertThreshold]);
+
+  const liveQueryOptions = { refetchInterval: 1000, refetchIntervalInBackground: true, staleTime: 500 };
+  const dashboardQuery = useGetElytraDashboard({ query: { queryKey: getGetElytraDashboardQueryKey(), ...liveQueryOptions } });
+  const historyQuery = useGetElytraHistory(historyParams, { query: { queryKey: getGetElytraHistoryQueryKey(historyParams), ...liveQueryOptions } });
+  const listingsQuery = useGetElytraListings(listingParams, { query: { queryKey: getGetElytraListingsQueryKey(listingParams), ...liveQueryOptions } });
+  const transactionsQuery = useGetElytraTransactions(transactionParams, { query: { queryKey: getGetElytraTransactionsQueryKey(transactionParams), ...liveQueryOptions } });
+  const alertsQuery = useGetElytraAlerts(alertParams, { query: { queryKey: getGetElytraAlertsQueryKey(alertParams), ...liveQueryOptions } });
+
+  const dashboard = dashboardQuery.data;
+  const stats = useMemo(() => (dashboard?.stats || []).filter((stat) => isCategory(stat.category)), [dashboard?.stats]);
+  const history = useMemo(() => (historyQuery.data || []).filter((point) => isCategory(point.category)) as ChartPoint[], [historyQuery.data]);
+  const listings = useMemo(() => listingsQuery.data || [], [listingsQuery.data]);
+  const transactions = useMemo(() => transactionsQuery.data || [], [transactionsQuery.data]);
+  const alerts = useMemo(() => alertsQuery.data || [], [alertsQuery.data]);
+  const selectedStat = stats.find((stat) => stat.category === category);
+  const benchmarkMedian = customMedian ?? selectedStat?.lowest ?? null;
+  const saveMedian = (value: number | null) => {
+    setCustomMedian(value);
+    writeStoredNumber(SETTINGS_STORAGE_KEYS.median, value);
+  };
+  const saveAlertThreshold = (value: number) => {
+    setAlertThreshold(value);
+    writeStoredNumber(SETTINGS_STORAGE_KEYS.alertThreshold, value);
+  };
+  const refetchAll = () => { void dashboardQuery.refetch(); void historyQuery.refetch(); void listingsQuery.refetch(); void transactionsQuery.refetch(); void alertsQuery.refetch(); };
+
+  return (
+    <main className="min-h-[100dvh] shell-grid">
+      <header className="border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/.86)] backdrop-blur-md">
+        <div className="mx-auto flex max-w-[1560px] items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
+          <div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-xl border border-[hsl(var(--primary)/.35)] bg-[hsl(var(--primary)/.1)]"><img src="/elytra-logo.png" alt="" className="h-full w-full object-contain" /></div><div><p className="display text-base font-bold tracking-tight">DonutSMP <span className="text-[hsl(var(--primary))]">/ Elytra</span></p><p className="mono text-[9px] uppercase tracking-[.2em] text-[hsl(var(--muted-foreground))]">market instrument panel</p></div></div>
+          <div className="flex items-center gap-2 sm:gap-5"><div className="hidden items-center gap-2 text-right sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--chart-3))]" /><span className="mono text-[10px] uppercase tracking-wider text-[hsl(var(--muted-foreground))]">170 base calls / min · pages 12+ on demand</span></div><button type="button" data-testid="button-refresh-all" onClick={refetchAll} className="inline-flex items-center gap-2 rounded-lg border border-[hsl(var(--card-border))] bg-[hsl(var(--secondary)/.6)] px-3 py-2 text-xs font-bold text-[hsl(var(--foreground))] transition-colors hover:border-[hsl(var(--primary)/.55)] hover:text-[hsl(var(--primary))]"><RefreshCw size={14} className={dashboardQuery.isFetching ? 'animate-spin' : ''} /><span className="hidden sm:inline">Refresh</span></button></div>
+        </div>
+      </header>
+      <div className="mx-auto max-w-[1560px] px-4 pb-10 pt-6 sm:px-6 lg:px-8">
+        <div className="fade-up"><ApiBanner api={dashboard?.api} generatedAt={dashboard?.generatedAt} isError={!!dashboardQuery.isError} onRetry={refetchAll} /></div>
+         <div className="fade-up-delay mt-7 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="mono text-[10px] uppercase tracking-[.24em] text-[hsl(var(--accent))]">live inventory monitor</p><h1 className="display mt-2 text-3xl font-bold tracking-[-.04em] sm:text-4xl">The Elytra market read.</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-[hsl(var(--muted-foreground))]">A clean view of what the market is reporting now. Direct Elytra listings only, with no enchantment filter and no synthetic trend lines.</p></div><div className="flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))]"><DatabaseZap size={14} className="text-[hsl(var(--primary))]" /><span className="mono">{dashboard ? `${formatNumber(dashboard.qualifyingListings)} active units` : 'awaiting inventory count'}</span></div></div>
+          {dashboardQuery.isLoading ? <div className="mt-6 grid gap-3 md:grid-cols-1"><Skeleton className="h-48 rounded-xl" /></div> : dashboardQuery.isError && !dashboard ? <div data-testid="error-dashboard" className="panel amber-rule mt-6 rounded-xl p-8 text-center"><ServerCrash size={25} className="mx-auto text-[hsl(var(--accent))]" /><h2 className="display mt-3 text-lg font-bold">Market snapshot unavailable</h2><p className="mx-auto mt-2 max-w-md text-sm text-[hsl(var(--muted-foreground))]">The dashboard endpoint is offline. Nothing is being inferred from missing data.</p><button type="button" data-testid="button-retry-dashboard-empty" onClick={refetchAll} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-[hsl(var(--primary))] px-4 py-2 text-xs font-bold text-[hsl(var(--primary-foreground))]"><RefreshCw size={14} /> Retry connection</button></div> : <><div className="fade-up-delay-2 mt-6 grid gap-3">{CATEGORIES.map((item) => <StatCard key={item} category={item} stat={stats.find((stat) => stat.category === item)} benchmarkMedian={customMedian ?? stats.find((stat) => stat.category === item)?.lowest ?? null} hasCustomMedian={customMedian != null} selected={category === item} onSelect={() => setCategory(item)} onEditMedian={() => setMedianEditorOpen(true)} />)}</div><div className="mt-6 grid gap-4 xl:grid-cols-[minmax(0,1.65fr)_minmax(300px,.8fr)]"><HistoryPanel points={history} loading={historyQuery.isLoading} category={category} median={benchmarkMedian} onSaveMedian={saveMedian} medianEditorOpen={medianEditorOpen} onCloseMedianEditor={() => setMedianEditorOpen(false)} /><div className="grid gap-4"><PredictionPanel points={history} stat={selectedStat} median={benchmarkMedian} medianIsCustom={customMedian != null} loading={historyQuery.isLoading} /><AlertsPanel alerts={alerts} loading={alertsQuery.isLoading} threshold={alertThreshold} onSaveThreshold={saveAlertThreshold} /></div></div><div className="mt-4 grid gap-4 xl:grid-cols-[1.15fr_1fr]"><ListingsPanel listings={listings} loading={listingsQuery.isLoading} category={listingCategory} sort={listingSort} setSort={setListingSort} /><TransactionsPanel transactions={transactions} loading={transactionsQuery.isLoading} category={transactionCategory} /></div></>} 
+         <footer className="mt-7 flex flex-col gap-2 border-t border-[hsl(var(--border))] pt-4 text-[10px] text-[hsl(var(--muted-foreground))] sm:flex-row sm:items-center sm:justify-between"><span className="inline-flex items-center gap-2"><Check size={13} className="text-[hsl(var(--chart-3))]" /> Live scope locked to DonutSMP Elytra search</span><span className="mono">{dashboard?.generatedAt ? `snapshot generated ${formatTime(dashboard.generatedAt, true)}` : 'snapshot time unavailable'}</span></footer>
+      </div>
+    </main>
+  );
+}

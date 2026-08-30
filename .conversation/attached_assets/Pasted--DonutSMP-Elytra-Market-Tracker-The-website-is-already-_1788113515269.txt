@@ -1,0 +1,356 @@
+# DonutSMP Elytra Market Tracker
+
+The website is already built, but the functionality is not working correctly. **Fix the existing website and make the entire system actually functional using real DonutSMP API data.**
+
+Keep the website **simple, clean, modern, and similar to the attached screenshots**. Use a dark glass-style market dashboard with clean cards, a large price graph, recent transactions, current listings, and market alerts.
+
+## 1. ONLY TRACK MENDING AND UNBREAKING III ELYTRAS
+
+The website must **ONLY track Elytras that have Mending and/or Unbreaking III**.
+
+Track exactly these categories:
+
+* Mending Elytras
+* Unbreaking III Elytras
+* Mending + Unbreaking III Elytras
+
+Do not track:
+
+* Plain Elytras
+* Mending books
+* Unbreaking books
+* Other items
+* Other armor
+* Weapons
+* Tools
+* Blocks
+* Any other Minecraft item
+
+Every price, listing, transaction, graph, statistic, and alert must be filtered to these Elytras.
+
+## 2. DONUTSMP API
+
+Use the real DonutSMP Public API.
+
+Base URL:
+
+`https://api.donutsmp.net/`
+
+Auction endpoint:
+
+`GET /v1/auction/list/{page}`
+
+Use Bearer authentication from the backend.
+
+Store the API key in:
+
+`DONUTSMP_API_KEY`
+
+Never expose the API key in frontend code, browser storage, or the public repository.
+
+## 3. EXACTLY 200 REQUESTS PER MINUTE MAXIMUM
+
+The application must support **up to 200 API requests per minute** while **never exceeding 200 requests per minute**.
+
+Implement a server-side request manager that:
+
+* Tracks every API request
+* Enforces a hard limit of 200 requests per rolling 60-second period
+* Queues requests when the limit is reached
+* Prevents duplicate requests
+* Uses caching
+* Uses centralized polling
+* Does not allow each website visitor to independently spam the DonutSMP API
+* Automatically waits for the next available request slot
+* Handles API errors without repeatedly retrying and exceeding the limit
+
+Display the current API usage on the dashboard, for example:
+
+`API Requests: 142 / 200`
+
+The limit must apply to the entire backend/API key, not separately to each visitor.
+
+## 4. REAL ELYTRA DATA
+
+Retrieve real Auction House data and identify qualifying Elytras using the API item information and enchantments.
+
+For each qualifying listing, collect:
+
+* Price
+* Item ID
+* Display name
+* Enchantments
+* Seller
+* Seller UUID
+* Quantity
+* Time remaining
+* Collection timestamp
+
+Correctly identify:
+
+`Mending`
+
+and:
+
+`Unbreaking III`
+
+Do not confuse Unbreaking I or II with Unbreaking III.
+
+## 5. PRICE STATISTICS
+
+Show live statistics for the qualifying Elytras:
+
+* Lowest price
+* Highest price
+* Average price
+* Median price
+* Active listings
+
+Provide separate statistics for:
+
+* Mending
+* Unbreaking III
+* Mending + Unbreaking III
+
+If there are no matching listings, display:
+
+`No current listings`
+
+Never display fake or zero values simply because data is unavailable.
+
+## 6. PRICE GRAPHS
+
+Make the graphs one of the main features of the website.
+
+Create an interactive:
+
+**Elytra Price History**
+
+graph.
+
+The X-axis should be time.
+
+The Y-axis should be price.
+
+The graph must use **real historical data collected from DonutSMP**.
+
+The line must naturally move **up and down based on actual market prices**.
+
+Do not generate random prices.
+
+Do not create fake historical points.
+
+Do not artificially make the graph go up or down.
+
+Add time ranges:
+
+* Last hour
+* Today
+* 7 days
+* 30 days
+
+Add filters:
+
+* Mending
+* Unbreaking III
+* Mending + Unbreaking III
+
+When hovering over a point, show:
+
+* Exact time
+* Price
+* Price change
+
+Store historical observations in persistent storage so the graph survives page refreshes and server restarts.
+
+## 7. MASSIVE BUY AND SELL ALERTS
+
+Create a real market-movement detection system.
+
+Analyze actual changes in Elytra listings, transactions, listing counts, and prices.
+
+When an unusually large amount of Mending or Unbreaking III Elytras are bought or sold, or the market experiences a major price movement, trigger an alert.
+
+Display:
+
+**ALERT — MASSIVE BUY**
+
+`Large Mending/Unbreaking III Elytra buying activity detected.`
+
+or:
+
+**ALERT — MASSIVE SELL**
+
+`Large Mending/Unbreaking III Elytra selling activity detected.`
+
+Each alert should show:
+
+* Massive Buy or Massive Sell
+* Elytra enchantment type
+* Number of affected Elytras
+* Previous price
+* Current price
+* Percentage change
+* Estimated transaction value when available
+* Time detected
+
+Use configurable thresholds so ordinary transactions do not constantly trigger alerts.
+
+Only create alerts from real data.
+
+## 8. ALERT HISTORY
+
+Create an alert history section showing previous market events.
+
+Example:
+
+`ALERT — MASSIVE BUY`
+`Mending + Unbreaking III`
+`17 Elytras affected`
+`+8.4% price movement`
+`11:06 AM`
+
+and:
+
+`ALERT — MASSIVE SELL`
+`Unbreaking III`
+`23 Elytras affected`
+`-7.1% price movement`
+`10:42 AM`
+
+Do not fabricate alerts.
+
+## 9. RECENT TRANSACTIONS
+
+Create a clean **Recent Elytra Transactions** table.
+
+Columns:
+
+* Seller
+* Price
+* Enchantments
+* Quantity
+* Time
+
+Only show Mending and/or Unbreaking III Elytras.
+
+## 10. CURRENT LISTINGS
+
+Create a **Current Elytra Listings** section.
+
+Show:
+
+* Price
+* Enchantments
+* Seller
+* Time remaining
+
+Allow sorting by:
+
+* Lowest price
+* Highest price
+* Recently listed
+
+Only show qualifying Elytras.
+
+## 11. DASHBOARD DESIGN
+
+Keep the interface simple and similar to the attached screenshots.
+
+Use:
+
+* Dark background
+* Subtle transparent/glass cards
+* Rounded corners
+* Simple borders
+* Clean typography
+* Minimal animations
+* Green for increases
+* Red for decreases
+* Clear spacing
+* Responsive design
+
+Main dashboard layout:
+
+1. Elytra market header
+2. Current market statistics
+3. Large price graph
+4. Mending / Unbreaking III filters
+5. Massive Buy/Sell alerts
+6. Recent transactions
+7. Current listings
+8. API status
+
+Do not overcrowd the interface.
+
+## 12. API STATUS
+
+Display the API connection status.
+
+Example:
+
+`API Connected`
+
+`Last updated: 11:10:12 AM`
+
+`API Requests: 142 / 200`
+
+If the API fails:
+
+`API Offline`
+
+Do not claim that unavailable data is live.
+
+## 13. BACKEND AND DATABASE
+
+The backend must handle:
+
+`DonutSMP API → Request Manager → Elytra Filter → Price Data → Database → Statistics → Graphs → Transaction Detection → Alerts → Frontend`
+
+Use persistent storage for historical prices and alerts.
+
+Do not lose historical data when the server restarts.
+
+Avoid storing unnecessary duplicate observations.
+
+## 14. ERROR HANDLING
+
+Handle:
+
+* 401 Unauthorized
+* 500 API errors
+* Network failures
+* Empty results
+* Missing item information
+* Missing enchantments
+* Invalid API responses
+* Rate limits
+* Database errors
+
+Do not repeatedly retry failed requests in a way that can exceed the **200 requests/minute** limit.
+
+## 15. FINAL REQUIREMENT
+
+Do not consider the website finished just because the page loads.
+
+Test the complete system with **real DonutSMP API data**.
+
+Verify that:
+
+* Real Mending Elytras appear
+* Real Unbreaking III Elytras appear
+* Mending + Unbreaking III Elytras are detected correctly
+* Other items are completely excluded
+* Prices are real
+* Graphs use real historical data
+* Graphs move up and down according to real prices
+* Transactions are real
+* Massive Buy alerts are based on real activity
+* Massive Sell alerts are based on real activity
+* Historical data persists
+* Multiple users share cached data
+* The backend never exceeds **200 API requests per minute**
+
+**The hard API limit is 200 requests per minute. Do not exceed it under any circumstances.**
+
+**ONLY TRACK MENDING AND/OR UNBREAKING III ELYTRAS.**

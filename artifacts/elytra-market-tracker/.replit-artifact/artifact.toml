@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "DonutSMP Elytra Market Tracker"
+description = "A live market dashboard for tracking only Mending, Unbreaking III, and Mending + Unbreaking III Elytras from the DonutSMP Auction House, with real price history, listings, transactions, alerts, and shared API rate limiting."
+version = "1.0.0"
+id = "artifacts/elytra-market-tracker"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23509
+
+[services.development]
+run = "pnpm --filter @workspace/elytra-market-tracker run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/elytra-market-tracker", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/elytra-market-tracker/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23509"
+BASE_PATH = "/"

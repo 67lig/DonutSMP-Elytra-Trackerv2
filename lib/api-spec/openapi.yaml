@@ -1,0 +1,311 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: elytra
+    description: Live DonutSMP Elytra market data
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /elytra/dashboard:
+    get:
+      operationId: getElytraDashboard
+      tags: [elytra]
+      summary: Get the Elytra market dashboard
+      description: Returns current qualifying Elytra market statistics, API usage, and update status.
+      responses:
+        "200":
+          description: Dashboard snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ElytraDashboard"
+  /elytra/history:
+    get:
+      operationId: getElytraHistory
+      tags: [elytra]
+      summary: Get real Elytra price history
+      parameters:
+        - $ref: "#/components/parameters/Category"
+        - $ref: "#/components/parameters/TimeRange"
+      responses:
+        "200":
+          description: Historical observations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PriceObservation"
+  /elytra/listings:
+    get:
+      operationId: getElytraListings
+      tags: [elytra]
+      summary: Get current qualifying Elytra listings
+      parameters:
+        - $ref: "#/components/parameters/Category"
+        - $ref: "#/components/parameters/ListingSort"
+      responses:
+        "200":
+          description: Current listings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ElytraListing"
+  /elytra/transactions:
+    get:
+      operationId: getElytraTransactions
+      tags: [elytra]
+      summary: Get recent qualifying Elytra observations
+      parameters:
+        - $ref: "#/components/parameters/Category"
+      responses:
+        "200":
+          description: Recent transactions or listing events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ElytraTransaction"
+  /elytra/alerts:
+    get:
+      operationId: getElytraAlerts
+      tags: [elytra]
+      summary: Get real Elytra market alerts
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 1
+            maximum: 50
+            default: 10
+        - name: threshold
+          in: query
+          required: false
+          description: Minimum number of units affected for an alert to be returned
+          schema:
+            type: number
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: Alert history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MarketAlert"
+components:
+  parameters:
+    Category:
+      name: category
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/ElytraCategory"
+    TimeRange:
+      name: range
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/TimeRange"
+    ListingSort:
+      name: sort
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [lowest, highest, recent]
+        default: lowest
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    ElytraCategory:
+      type: string
+      enum: [elytra]
+    TimeRange:
+      type: string
+      enum: [five_minutes, hour, today, seven_days, thirty_days, one_year]
+    ElytraStats:
+      type: object
+      properties:
+        category:
+          $ref: "#/components/schemas/ElytraCategory"
+        lowest:
+          type: ["number", "null"]
+        highest:
+          type: ["number", "null"]
+        average:
+          type: ["number", "null"]
+        median:
+          type: ["number", "null"]
+        activeListings:
+          type: number
+        priceChange:
+          type: ["number", "null"]
+        currency:
+          type: string
+      required: [category, lowest, highest, average, median, activeListings, priceChange, currency]
+    ApiStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        lastUpdated:
+          type: ["string", "null"]
+          format: date-time
+        requestsInWindow:
+          type: number
+        requestLimit:
+          type: number
+        message:
+          type: string
+      required: [connected, lastUpdated, requestsInWindow, requestLimit, message]
+    ElytraDashboard:
+      type: object
+      properties:
+        stats:
+          type: array
+          items:
+            $ref: "#/components/schemas/ElytraStats"
+        api:
+          $ref: "#/components/schemas/ApiStatus"
+        qualifyingListings:
+          type: number
+        generatedAt:
+          type: string
+          format: date-time
+      required: [stats, api, qualifyingListings, generatedAt]
+    PriceObservation:
+      type: object
+      properties:
+        id:
+          type: number
+        category:
+          $ref: "#/components/schemas/ElytraCategory"
+        timestamp:
+          type: string
+          format: date-time
+        price:
+          type: number
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        priceChange:
+          type: ["number", "null"]
+        sampleSize:
+          type: number
+        observationCount:
+          type: number
+      required: [id, category, timestamp, price, open, high, low, close, priceChange, sampleSize, observationCount]
+    ElytraListing:
+      type: object
+      properties:
+        id:
+          type: string
+        itemId:
+          type: ["string", "null"]
+        displayName:
+          type: string
+        category:
+          $ref: "#/components/schemas/ElytraCategory"
+        enchantments:
+          type: array
+          items:
+            type: string
+        price:
+          type: number
+        seller:
+          type: string
+        sellerUuid:
+          type: ["string", "null"]
+        quantity:
+          type: number
+        timeRemaining:
+          type: ["string", "null"]
+        collectedAt:
+          type: string
+          format: date-time
+      required: [id, itemId, displayName, category, enchantments, price, seller, sellerUuid, quantity, timeRemaining, collectedAt]
+    ElytraTransaction:
+      type: object
+      properties:
+        id:
+          type: string
+        seller:
+          type: string
+        price:
+          type: number
+        category:
+          $ref: "#/components/schemas/ElytraCategory"
+        enchantments:
+          type: array
+          items:
+            type: string
+        quantity:
+          type: number
+        timestamp:
+          type: string
+          format: date-time
+      required: [id, seller, price, category, enchantments, quantity, timestamp]
+    MarketAlert:
+      type: object
+      properties:
+        id:
+          type: number
+        type:
+          type: string
+          enum: [massive_buy, massive_sell]
+        category:
+          $ref: "#/components/schemas/ElytraCategory"
+        affectedQuantity:
+          type: number
+        previousPrice:
+          type: ["number", "null"]
+        currentPrice:
+          type: ["number", "null"]
+        percentageChange:
+          type: ["number", "null"]
+        estimatedValue:
+          type: ["number", "null"]
+        detectedAt:
+          type: string
+          format: date-time
+      required: [id, type, category, affectedQuantity, previousPrice, currentPrice, percentageChange, estimatedValue, detectedAt]
+
